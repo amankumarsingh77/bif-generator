@@ -1,7 +1,14 @@
-#static/
+static/
 .claude/
 plan.md
 ARCHITECTURE.md
 outputs/
 uploads/
 benchmarks/
+
+# Build artifacts
+dist/
+bif-generator
+*.exe
+*.tar.gz
+*.zip

@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version $VERSION"
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+
+          # Build for macOS (Intel)
+          GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o dist/bif-generator-darwin-amd64 .
+
+          # Build for macOS (Apple Silicon)
+          GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o dist/bif-generator-darwin-arm64 .
+
+          # Build for Linux (x86_64)
+          GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o dist/bif-generator-linux-amd64 .
+
+          # Build for Linux (ARM64)
+          GOOS=linux GOARCH=arm64 go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o dist/bif-generator-linux-arm64 .
+
+          # Build for Windows (x86_64)
+          GOOS=windows GOARCH=amd64 go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o dist/bif-generator-windows-amd64.exe .
+
+      - name: Create archives
+        run: |
+          cd dist
+          tar -czf bif-generator-darwin-amd64.tar.gz bif-generator-darwin-amd64
+          tar -czf bif-generator-darwin-arm64.tar.gz bif-generator-darwin-arm64
+          tar -czf bif-generator-linux-amd64.tar.gz bif-generator-linux-amd64
+          tar -czf bif-generator-linux-arm64.tar.gz bif-generator-linux-arm64
+          zip bif-generator-windows-amd64.zip bif-generator-windows-amd64.exe
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.{tar.gz,zip} > CHECKSUMS.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/CHECKSUMS.txt
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
