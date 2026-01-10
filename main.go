@@ -1,261 +1,208 @@
 package main
 
 import (
-	"context"
-	"encoding/binary"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
-type Frame struct {
-	Data []byte
-	Size uint64
-}
-
-const (
-	bifHeaderSize = 64
-)
-
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "serve" {
+	// Parse flags
+	serveCmd := flag.Bool("serve", false, "Start static file server")
+	input := flag.String("input", "", "Path to video file")
+	output := flag.String("output", "output.bif", "Path to output BIF file")
+	interval := flag.Int("interval", 10, "Frame interval in seconds")
+	parallel := flag.Bool("parallel", false, "Use parallel frame extraction")
+	workers := flag.Int("workers", 8, "Number of parallel workers")
+	flag.Parse()
+
+	if *serveCmd {
 		serveStatic()
 		return
 	}
 
-	input := "/home/aman/Downloads/Dude (2025) (Hindi DD5.1-224Kbps + Tamil) Dual Audio UnCut South Movie HD 1080p ESub.mkv"
-	interval := 10
-	output := "dude.bif"
-	start := time.Now()
-	if err := generateBIF(input, output, interval); err != nil {
-		fmt.Printf("failed to generate bif : %v", err)
+	if *input == "" {
+		fmt.Println("Usage: bif-generator -input <video.mp4> [-output output.bif] [-interval 10] [--parallel] [-workers 8]")
+		fmt.Println("       bif-generator -serve")
+		os.Exit(1)
 	}
-	fmt.Printf("Prossed in %f sec\n", time.Since(start).Seconds())
+
+	start := time.Now()
+	numWorkers := 1
+	if *parallel {
+		numWorkers = *workers
+	}
+	// Create progress bar for CLI mode
+	progressBar := newProgressBar(0) // total will be set by generateBIF's internal logic
+	progressCallback := func(current, total int) {
+		if progressBar.total == 0 && total > 0 {
+			progressBar.total = total
+		}
+		progressBar.add()
+	}
+
+	if err := generateBIF(*input, *output, *interval, numWorkers, progressCallback); err != nil {
+		log.Fatalf("Failed to generate BIF: %v", err)
+	}
+	log.Printf("Done! Processed in %.1f seconds. Output: %s", time.Since(start).Seconds(), *output)
 }
 
 func serveStatic() {
+	os.MkdirAll("./uploads", 0755)
+	os.MkdirAll("./outputs", 0755)
+
+	http.HandleFunc("/api/generate", handleGenerateAPI)
+
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/", fs)
 
+	http.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("./uploads"))))
+	http.Handle("/outputs/", http.StripPrefix("/outputs/", http.FileServer(http.Dir("./outputs"))))
+
 	port := "8080"
-	log.Printf("Serving static files at http://localhost:%s\n", port)
-	log.Printf("Open http://localhost:%s/index.html to view the BIF preview\n", port)
+	log.Printf("Serving at http://localhost:%s\n", port)
+	log.Printf("Open http://localhost:%s/index.html to use the BIF generator\n", port)
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func writeBIFHeader(
-	w io.Writer,
-	frameCount uint32,
-	intervalMS uint32,
-	width uint32,
-	height uint32,
-) error {
+func handleGenerateAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-	w.Write([]byte{'B', 'I', 'F', 0, 0, 0, 0, 0})
-	writeLE(w, uint32(1)) // version
-	writeLE(w, frameCount)
-	writeLE(w, intervalMS)
-	writeLE(w, width)
-	writeLE(w, height)
-	w.Write(make([]byte, 36)) // reserved
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	err := r.ParseMultipartForm(500 * 1024 * 1024)
+	if err != nil {
+		sendSSEError(w, flusher, "Failed to parse form: "+err.Error())
+		return
+	}
+
+	file, header, err := r.FormFile("video")
+	if err != nil {
+		sendSSEError(w, flusher, "Failed to get video file: "+err.Error())
+		return
+	}
+	defer file.Close()
+
+	intervalStr := r.FormValue("interval")
+	interval, _ := strconv.Atoi(intervalStr)
+	if interval == 0 {
+		interval = 10
+	}
+
+	parallel := r.FormValue("parallel") == "true"
+	workersStr := r.FormValue("workers")
+	workers, _ := strconv.Atoi(workersStr)
+	if workers == 0 {
+		workers = 8
+	}
+
+	timestamp := time.Now().UnixNano()
+	videoBaseName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename))
+	outputDir := filepath.Join("./outputs", fmt.Sprintf("%d", timestamp))
+	os.MkdirAll(outputDir, 0755)
+
+	videoPath := filepath.Join(outputDir, header.Filename)
+	bifPath := filepath.Join(outputDir, videoBaseName+".bif")
+
+	sendSSEProgress(w, flusher, 0, "Saving video file...")
+	dst, err := os.Create(videoPath)
+	if err != nil {
+		sendSSEError(w, flusher, "Failed to save video: "+err.Error())
+		return
+	}
+	defer dst.Close()
+
+	written, err := io.Copy(dst, file)
+	if err != nil {
+		sendSSEError(w, flusher, "Failed to save video: "+err.Error())
+		return
+	}
+	log.Printf("Saved uploaded video: %s (%d bytes)", videoPath, written)
+
+	sendSSEProgress(w, flusher, 5, "Analyzing video...")
+
+	numFrames := 0
+	progressCallback := func(current, total int) {
+		progress := 5 + (current * 90 / total)
+		sendSSEProgress(w, flusher, progress, fmt.Sprintf("Extracting frame %d/%d", current, total))
+		numFrames = total
+	}
+
+	numWorkers := 1
+	if parallel {
+		numWorkers = workers
+	}
+	genErr := generateBIF(videoPath, bifPath, interval, numWorkers, progressCallback)
+
+	if genErr != nil {
+		sendSSEError(w, flusher, "Generation failed: "+genErr.Error())
+		return
+	}
+
+	videoURL := fmt.Sprintf("/uploads/%d/%s", timestamp, header.Filename)
+	bifURL := fmt.Sprintf("/outputs/%d/%s.bif", timestamp, videoBaseName)
+
+	uploadDir := filepath.Join("./uploads", fmt.Sprintf("%d", timestamp))
+	os.MkdirAll(uploadDir, 0755)
+	finalVideoPath := filepath.Join(uploadDir, header.Filename)
+	os.Rename(videoPath, finalVideoPath)
+	videoPath = finalVideoPath
+
+	result := map[string]any{
+		"done":     true,
+		"bifUrl":   bifURL,
+		"videoUrl": videoURL,
+		"frames":   numFrames,
+	}
+	sendSSEData(w, flusher, result)
+
+	log.Printf("Generated BIF: %s (%d frames)", bifPath, numFrames)
+}
+
+func sendSSEProgress(w http.ResponseWriter, flusher http.Flusher, progress int, status string) {
+	data := map[string]any{
+		"progress": progress,
+		"status":   status,
+	}
+	sendSSEData(w, flusher, data)
+}
+
+func sendSSEError(w http.ResponseWriter, flusher http.Flusher, message string) {
+	data := map[string]any{
+		"error": message,
+	}
+	sendSSEData(w, flusher, data)
+}
+
+func sendSSEData(w http.ResponseWriter, flusher http.Flusher, data map[string]any) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "data: %s\n\n", jsonData)
+	flusher.Flush()
 	return nil
-}
-
-func generateBIF(video string, output string, interval int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Minute)
-	defer cancel()
-
-	const (
-		width      = 320
-		height     = 180
-		headerSize = 64
-	)
-	intervalMS := interval * 1000 // 10 seconds
-
-	// -------------------------------------------------
-	// PASS 1: Extract JPEG frames + sizes
-	// -------------------------------------------------
-	stdout, cmd, err := startFFmpeg(ctx, video, interval)
-	if err != nil {
-		return err
-	}
-
-	var frames [][]byte
-	var sizes []uint64
-
-	err = readMJPEGFrames(stdout, func(jpeg []byte) error {
-		frames = append(frames, jpeg)
-		sizes = append(sizes, uint64(len(jpeg)))
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	if err := cmd.Wait(); err != nil {
-		return err
-	}
-
-	frameCount := len(frames)
-	if frameCount == 0 {
-		return fmt.Errorf("no frames extracted")
-	}
-
-	// -------------------------------------------------
-	// Compute OFFSETS (absolute file offsets)
-	// -------------------------------------------------
-	indexSize := uint64((frameCount + 1) * 8)
-	imageStart := uint64(headerSize) + indexSize
-
-	offsets := make([]uint64, 0, frameCount+1)
-	cur := imageStart
-
-	for _, sz := range sizes {
-		offsets = append(offsets, cur)
-		cur += sz
-	}
-	offsets = append(offsets, cur) // EOF offset
-
-	// -------------------------------------------------
-	// PASS 2: Write BIF file
-	// -------------------------------------------------
-	f, err := os.Create(output)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	// Header
-	if err := writeBIFHeader(
-		f,
-		uint32(frameCount),
-		uint32(intervalMS),
-		uint32(width),
-		uint32(height),
-	); err != nil {
-		return err
-	}
-
-	// Index table
-	for _, off := range offsets {
-		if err := writeLE(f, off); err != nil {
-			return err
-		}
-	}
-
-	// Image data
-	for _, jpeg := range frames {
-		if _, err := f.Write(jpeg); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func readMJPEGFrames(r io.Reader, onFrame func([]byte) error) error {
-	const (
-		jpegStart = 0xFFD8
-		jpegEnd   = 0xFFD9
-	)
-
-	buf := make([]byte, 32*1024)
-	var frame []byte
-	inFrame := false
-	var prev byte
-
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			for i := range n {
-				b := buf[i]
-
-				if !inFrame {
-					if prev == 0xFF && b == 0xD8 {
-						inFrame = true
-						frame = []byte{0xFF, 0xD8}
-					}
-				} else {
-					frame = append(frame, b)
-					if prev == 0xFF && b == 0xD9 {
-						if err := onFrame(frame); err != nil {
-							return err
-						}
-						inFrame = false
-						frame = nil
-					}
-				}
-				prev = b
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func getDuration(videoPath string) (float64, error) {
-	cmd := exec.Command(
-		"ffprobe",
-		"-v", "error",
-		"-show_entries",
-		"format=duration",
-		"-of", "default=noprint_wrappers=1:nokey=1",
-		fmt.Sprintf("%s", videoPath),
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get video duration : %v", string(out))
-	}
-	s := strings.TrimSpace(string(out))
-	duration, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse duration : %v", err.Error())
-	}
-	return duration, nil
-}
-
-func startFFmpeg(ctx context.Context, video string, interval int) (io.ReadCloser, *exec.Cmd, error) {
-	cmd := exec.CommandContext(
-		ctx,
-		"ffmpeg",
-		"-i",
-		fmt.Sprintf("%s", video),
-		"-vf",
-		fmt.Sprintf("fps=1/%d,scale=320:180", interval),
-		"-q:v", "10",
-		"-f", "image2pipe",
-		"-vcodec", "mjpeg",
-		"pipe:1",
-	)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		return nil, nil, err
-	}
-
-	return stdout, cmd, nil
-}
-
-func writeLE(w io.Writer, v any) error {
-	return binary.Write(w, binary.LittleEndian, v)
 }
