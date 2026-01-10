@@ -84,17 +84,13 @@ go build -o bif-generator
 
 ## Demos
 
-### CLI Generation
-
-<p align="center">
-  <video src="static/cli.mp4" width="600" controls></video>
-</p>
-
 ### Web UI Generation
 
-<p align="center">
-  <video src="static/ui.mp4" width="600" controls></video>
-</p>
+https://github.com/user-attachments/assets/929bd119-5100-4df7-a773-8edd23574b2b
+
+### CLI Generation
+
+https://github.com/user-attachments/assets/053a2894-c0e8-45f8-b628-fadc537c2bed
 
 ---
 
