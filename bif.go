@@ -53,7 +53,6 @@ func writeBIF(frames [][]byte, output string, interval int) error {
 		return fmt.Errorf("no frames to write")
 	}
 
-	// Header
 	if err := writeBIFHeader(
 		f,
 		uint32(frameCount),
@@ -64,13 +63,11 @@ func writeBIF(frames [][]byte, output string, interval int) error {
 		return err
 	}
 
-	// Calculate sizes for index
 	sizes := make([]uint64, len(frames))
 	for i, frame := range frames {
 		sizes[i] = uint64(len(frame))
 	}
 
-	// Compute OFFSETS (absolute file offsets)
 	indexSize := uint64((frameCount + 1) * 8)
 	imageStart := uint64(headerSize) + indexSize
 
@@ -81,16 +78,14 @@ func writeBIF(frames [][]byte, output string, interval int) error {
 		offsets = append(offsets, cur)
 		cur += sz
 	}
-	offsets = append(offsets, cur) // EOF offset
+	offsets = append(offsets, cur)
 
-	// Index table
 	for _, off := range offsets {
 		if err := writeLE(f, off); err != nil {
 			return err
 		}
 	}
 
-	// Image data
 	for _, jpeg := range frames {
 		if _, err := f.Write(jpeg); err != nil {
 			return err

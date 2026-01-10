@@ -146,7 +146,8 @@ func handleGenerateAPI(w http.ResponseWriter, r *http.Request) {
 
 	numFrames := 0
 	progressCallback := func(current, total int) {
-		progress := 5 + (current * 90 / total)
+		// Use float to avoid integer division rounding issues
+		progress := 5 + int(float64(current)*90.0/float64(total))
 		sendSSEProgress(w, flusher, progress, fmt.Sprintf("Extracting frame %d/%d", current, total))
 		numFrames = total
 	}
@@ -170,6 +171,9 @@ func handleGenerateAPI(w http.ResponseWriter, r *http.Request) {
 	finalVideoPath := filepath.Join(uploadDir, header.Filename)
 	os.Rename(videoPath, finalVideoPath)
 	videoPath = finalVideoPath
+
+	// Send final progress update at 100%
+	sendSSEProgress(w, flusher, 100, fmt.Sprintf("Generated %d frames", numFrames))
 
 	result := map[string]any{
 		"done":     true,

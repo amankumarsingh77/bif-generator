@@ -1,6 +1,7 @@
-static/
+#static/
 .claude/
 plan.md
 ARCHITECTURE.md
 outputs/
 uploads/
+benchmarks/
