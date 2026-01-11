@@ -76,8 +76,6 @@ go build -o bif-generator
 # Parallel mode — warp speed
 ./bif-generator -input video.mp4 --parallel --workers 8
 
-# Pipe directly to stdout
-./bif-generator -input video.mp4 > video.bif
 ```
 
 ---
