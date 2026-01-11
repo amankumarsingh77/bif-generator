@@ -14,7 +14,7 @@
 
 ## About
 
-BIF Generator is a high-performance command-line tool and web service that generates BIF (Binary Image Format) files — the same thumbnail preview format used by major streaming platforms like Netflix, Hulu, and YouTube. When you hover over a video progress bar and see those slick thumbnail previews, you're looking at a BIF file in action.
+BIF Generator is a high-performance command-line tool and web service that generates BIF (Base Index Frames) files — the same thumbnail preview format used by major streaming platforms like Netflix, Hulu, and YouTube. When you hover over a video progress bar and see those slick thumbnail previews, you're looking at a BIF file in action.
 
 This tool extracts frames from your videos at regular intervals, compresses them as JPEG images, and bundles everything into a single optimized `.bif` file with an embedded index table for instant random access. The result is a professional-grade seek thumbnail experience that works anywhere.
 
